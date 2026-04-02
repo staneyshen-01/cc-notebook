@@ -1,16 +1,16 @@
-# Claude Code 自动回滚机制解析与版本切换指南
+# Claude Code 自動回滾機制解析與版本切換指南
 
 > 日期：2026-03-31
 
 ## 背景
 
-Claude Code 从 v2.1.88 自动回滚到 v2.1.87，本文记录了完整的排查过程和解决方案。
+Claude Code 從 v2.1.88 自動回滾到 v2.1.87，本文記錄了完整的排查過程和解決方案。
 
-## 回滚原因
+## 回滾原因
 
-**Anthropic 在 npm 做了服务端回滚**，不是本地触发的。
+**Anthropic 在 npm 做了服務端回滾**，不是本地觸發的。
 
-### npm Registry 状态
+### npm Registry 狀態
 
 | dist-tag | 版本 |
 |----------|------|
@@ -18,116 +18,116 @@ Claude Code 从 v2.1.88 自动回滚到 v2.1.87，本文记录了完整的排查
 | `latest` | 2.1.87 |
 | `next` | 2.1.89 |
 
-- v2.1.88 **已被完全从 npm 删除**（registry 中不存在）
-- `latest` tag 从 2.1.88 退回到 2.1.87
+- v2.1.88 **已被完全從 npm 刪除**（registry 中不存在）
+- `latest` tag 從 2.1.88 退回到 2.1.87
 
-### 时间线
+### 時間線
 
-| 时间 | 事件 |
+| 時間 | 事件 |
 |------|------|
-| Mar 28 19:25 | 自动更新下载 v2.1.87 |
-| Mar 30 18:31 | 自动更新下载 v2.1.88 |
-| Mar 30 ~ Mar 31 | Anthropic 从 npm 撤掉 v2.1.88，将 `latest` tag 退回 v2.1.87 |
-| Mar 31 05:59 | 自动更新器检查 npm registry，发现 `latest` 是 2.1.87，将 symlink 切回 |
+| Mar 28 19:25 | 自動更新下載 v2.1.87 |
+| Mar 30 18:31 | 自動更新下載 v2.1.88 |
+| Mar 30 ~ Mar 31 | Anthropic 從 npm 撤掉 v2.1.88，將 `latest` tag 退回 v2.1.87 |
+| Mar 31 05:59 | 自動更新器檢查 npm registry，發現 `latest` 是 2.1.87，將 symlink 切回 |
 
-## 自动更新机制
+## 自動更新機制
 
-### 核心架构
+### 核心架構
 
 ```
 ~/.local/bin/claude  →  symlink  →  ~/.local/share/claude/versions/{version}
 ```
 
 - 包名：`@anthropic-ai/claude-code`
-- 版本二进制存储：`~/.local/share/claude/versions/`
+- 版本二進位制儲存：`~/.local/share/claude/versions/`
 - 入口 symlink：`~/.local/bin/claude`
 
 ### AutoUpdater 工作流程
 
-1. 每次 Claude Code 启动时，AutoUpdater 检查 npm registry 的 `latest` dist-tag
-2. 如果本地版本与 `latest` 不匹配，下载目标版本二进制到 `versions/` 目录
+1. 每次 Claude Code 啟動時，AutoUpdater 檢查 npm registry 的 `latest` dist-tag
+2. 如果本地版本與 `latest` 不匹配，下載目標版本二進位制到 `versions/` 目錄
 3. 更新 symlink 指向新版本
-4. 逻辑是**跟随 `latest` tag**，不是单调递增 — 所以 Anthropic 退 tag 就等于回滚
+4. 邏輯是**跟隨 `latest` tag**，不是單調遞增 — 所以 Anthropic 退 tag 就等於回滾
 
-### 关键发现
+### 關鍵發現
 
-- 二进制是 Bun 编译的 Mach-O arm64 可执行文件
-- 内部包含 `auto_updater_disabled`、`AutoUpdater`、`autoUpdaterStatus` 等标识
-- 启动遥测会上报 `auto_updater_disabled` 状态
-- 并发更新有互斥锁保护（"Another instance is currently performing an update"）
+- 二進位制是 Bun 編譯的 Mach-O arm64 可執行檔案
+- 內部包含 `auto_updater_disabled`、`AutoUpdater`、`autoUpdaterStatus` 等標識
+- 啟動遙測會上報 `auto_updater_disabled` 狀態
+- 併發更新有互斥鎖保護（"Another instance is currently performing an update"）
 
-## 禁用自动更新的正确方式
+## 禁用自動更新的正確方式
 
-通过逆向二进制中的 `h1H()` / `isAutoUpdaterDisabled` 函数，确认自动更新器的检查逻辑：
+透過逆向二進位制中的 `h1H()` / `isAutoUpdaterDisabled` 函式，確認自動更新器的檢查邏輯：
 
 ```javascript
-// 反编译后的禁用检查逻辑（简化）
+// 反編譯後的禁用檢查邏輯（簡化）
 function getAutoUpdaterDisabledReason() {
   if (process.env.DISABLE_AUTOUPDATER) return { type: "env" };
   if (config.autoUpdates === false)     return { type: "config" };
-  return null; // 未禁用，自动更新正常运行
+  return null; // 未禁用，自動更新正常執行
 }
 ```
 
-### 踩坑记录
+### 踩坑記錄
 
-`autoUpdaterDisabled: true` 是**错误的 key**，写了不生效，自动更新器仍会在启动时抢先将 symlink 切回 `latest` 指向的版本。
+`autoUpdaterDisabled: true` 是**錯誤的 key**，寫了不生效，自動更新器仍會在啟動時搶先將 symlink 切回 `latest` 指向的版本。
 
-### 方法 A：环境变量（推荐，最可靠）
+### 方法 A：環境變數（推薦，最可靠）
 
 ```bash
-# 加到 ~/.zshrc，每次 shell 启动自动生效
+# 加到 ~/.zshrc，每次 shell 啟動自動生效
 echo 'export DISABLE_AUTOUPDATER=1' >> ~/.zshrc
 source ~/.zshrc
 ```
 
 ### 方法 B：settings.json
 
-编辑 `~/.claude/settings.json`，注意 key 是 `autoUpdates`：
+編輯 `~/.claude/settings.json`，注意 key 是 `autoUpdates`：
 
 ```json
 "autoUpdates": false
 ```
 
-> 注意：对于 native 安装方式，如果同时设置了 `autoUpdatesProtectedForNative: true`，则 `autoUpdates: false` 会被覆盖，此时只能用环境变量方式。
+> 注意：對於 native 安裝方式，如果同時設定了 `autoUpdatesProtectedForNative: true`，則 `autoUpdates: false` 會被覆蓋，此時只能用環境變數方式。
 
-## 解决方案：切回 v2.1.88
+## 解決方案：切回 v2.1.88
 
-### 步骤 1：禁用自动更新
+### 步驟 1：禁用自動更新
 
 ```bash
-# 确保环境变量已生效
+# 確保環境變數已生效
 export DISABLE_AUTOUPDATER=1
 ```
 
-### 步骤 2：切换 symlink
+### 步驟 2：切換 symlink
 
 ```bash
 ln -sf ~/.local/share/claude/versions/2.1.88 ~/.local/bin/claude
 ```
 
-### 步骤 3：验证
+### 步驟 3：驗證
 
 ```bash
 claude --version
-# 输出：2.1.88 (Claude Code)
+# 輸出：2.1.88 (Claude Code)
 ```
 
-### 步骤 4：使用
+### 步驟 4：使用
 
 ```bash
 claude --dangerously-skip-permissions
 ```
 
-## 恢复自动更新
+## 恢復自動更新
 
 ```bash
-# 1. 从 ~/.zshrc 删掉 export DISABLE_AUTOUPDATER=1
-# 2. 如果用了方法 B，从 settings.json 删掉 "autoUpdates": false
-# 3. 重启终端，自动更新器会在下次启动时恢复工作
+# 1. 從 ~/.zshrc 刪掉 export DISABLE_AUTOUPDATER=1
+# 2. 如果用了方法 B，從 settings.json 刪掉 "autoUpdates": false
+# 3. 重啟終端，自動更新器會在下次啟動時恢復工作
 ```
 
-## 其他版本切换方式
+## 其他版本切換方式
 
 ```bash
 # 切到 next channel (v2.1.89)
@@ -136,15 +136,15 @@ claude update --channel next
 # 切到 stable channel (v2.1.81)
 claude update --channel stable
 
-# 查看本地已有的版本
+# 檢視本地已有的版本
 ls ~/.local/share/claude/versions/
 
-# 手动切换到任意本地版本
-ln -sf ~/.local/share/claude/versions/<版本号> ~/.local/bin/claude
+# 手動切換到任意本地版本
+ln -sf ~/.local/share/claude/versions/<版本號> ~/.local/bin/claude
 ```
 
-## 注意事项
+## 注意事項
 
-- v2.1.88 被 Anthropic 从 npm 删除，可能存在已知问题
-- 禁用自动更新后不会收到安全修复，需定期手动检查
-- 本地残留的 v2.1.88 二进制不会被自动清理
+- v2.1.88 被 Anthropic 從 npm 刪除，可能存在已知問題
+- 禁用自動更新後不會收到安全修復，需定期手動檢查
+- 本地殘留的 v2.1.88 二進位制不會被自動清理
